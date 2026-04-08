@@ -3,5 +3,5 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/REAL-TIME-AIML-PHISHING-DETECTION-AND-PREVENTION/',
+  base: '/REAL-TIME-AIML-PHISHING-DETECTION-AND-PREVENTION-/',
 })
