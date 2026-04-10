@@ -1,36 +1,15 @@
 import { useState } from 'react';
 import './App.css';
-
-// Use env variable (set in .env or GitHub Actions); fallback to localhost for dev
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
-// ---------- Mock result shown when backend is unreachable (demo / GitHub Pages) ----------
-const MOCK_RESULT = (url) => ({
-  url,
-  result: url.toLowerCase().includes('paypal') || url.toLowerCase().includes('login') || url.toLowerCase().includes('secure') ? 'Phishing' : 'Safe',
-  phishing_probability: url.toLowerCase().includes('paypal') || url.toLowerCase().includes('login') ? 0.91 : 0.07,
-  features: {
-    url_length: url.length,
-    num_hyphens: (url.match(/-/g) || []).length,
-    num_subdomains: (url.match(/\./g) || []).length - 1,
-    has_at_symbol: url.includes('@') ? 1 : 0,
-    has_ip_address: /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(url) ? 1 : 0,
-    has_suspicious_words: /secure|login|update|verify|paypal|bank|account/.test(url.toLowerCase()) ? 1 : 0,
-    is_https: url.startsWith('https') ? 1 : 0,
-    has_hidden_elements: 0,
-  },
-  _demo: true,
-});
-// ---------------------------------------------------------------------------------------
+import { extractFeatures } from './featureExtraction';
+import { classifyUrl } from './phishingModel';
 
 function App() {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
-  const [demoMode, setDemoMode] = useState(false);
 
-  const checkUrl = async (e) => {
+  const checkUrl = (e) => {
     e.preventDefault();
     if (!url.trim()) return;
 
@@ -38,98 +17,95 @@ function App() {
     setResult(null);
     setError(null);
 
-    try {
-      const targetUrl = url.trim();
+    // Simulate a slight processing delay so the loader animation is visible
+    setTimeout(() => {
+      try {
+        const rawUrl = url.trim();
+        const features = extractFeatures(rawUrl);
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
+        if (!features) {
+          setError('Invalid URL. Please enter a valid web address.');
+          setLoading(false);
+          return;
+        }
 
-      const response = await fetch(`${API_BASE}/api/check-url`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+        const { result: verdict, phishing_probability } = classifyUrl(features);
 
-      if (!response.ok) {
-        throw new Error(`Server error ${response.status}: Please check if the backend is running.`);
+        setResult({
+          url: rawUrl,
+          result: verdict,
+          phishing_probability,
+          features,
+        });
+      } catch (err) {
+        setError('Analysis failed: ' + err.message);
+      } finally {
+        setLoading(false);
       }
-
-      const data = await response.json();
-      setDemoMode(false);
-      setResult(data);
-    } catch (err) {
-      console.error(err);
-
-      // If network/fetch fails → fall back to demo mode instead of raw error
-      if (err.name === 'AbortError' || err.name === 'TypeError' || err.message.includes('fetch')) {
-        setDemoMode(true);
-        setResult(MOCK_RESULT(url.trim()));
-        setError(null);
-      } else {
-        setError(err.message || 'Error connecting to the analysis server.');
-      }
-    } finally {
-      setLoading(false);
-    }
+    }, 800);
   };
 
   const isPhishing = result?.result === 'Phishing';
   const score = result ? (result.phishing_probability * 100).toFixed(0) : 0;
 
-  // Format Feature name nicely 
-  const formatFeatureName = (str) => {
-    return str.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-  };
+  // Format feature name nicely
+  const formatFeatureName = (str) =>
+    str.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
-  // Determine if a feature value is risky (this is a heuristic for UI colors)
+  // Determine risk class for each feature
   const isFeatureRisky = (key, val) => {
     if (key === 'url_length' && val > 54) return true;
+    if (key === 'is_long_url' && val === 1) return true;
     if (key === 'has_at_symbol' && val === 1) return true;
     if (key === 'has_ip_address' && val === 1) return true;
     if (key === 'num_hyphens' && val > 2) return true;
+    if (key === 'has_hyphen_in_domain' && val === 1) return true;
+    if (key === 'num_subdomains' && val > 1) return true;
     if (key === 'has_suspicious_words' && val === 1) return true;
-    if (key === 'is_https' && val === 0) return true;
+    if (key === 'has_form_with_action' && val === 1) return true;
+    if (key === 'has_password_field' && val === 1) return true;
     if (key === 'has_hidden_elements' && val === 1) return true;
+    if (key === 'is_https' && val === 0) return true;
     return false;
   };
 
   const getFeatureClass = (key, val) => {
     if (key === 'url_length') return val > 54 ? 'bad' : 'good';
-    if (key === 'num_hyphens' || key === 'num_subdomains') return val > 2 ? 'bad' : 'neutral';
-    
-    // For binary features
-    if (val === 1 || val === 0) {
-      return isFeatureRisky(key, val) ? 'bad' : 'good';
-    }
+    if (key === 'is_https') return val === 1 ? 'good' : 'bad';
+    if (key === 'num_hyphens') return val > 2 ? 'bad' : val > 0 ? 'neutral' : 'good';
+    if (key === 'num_subdomains') return val > 1 ? 'bad' : val === 1 ? 'neutral' : 'good';
+    if (val === 1 || val === 0) return isFeatureRisky(key, val) ? 'bad' : 'good';
     return 'neutral';
+  };
+
+  const formatFeatureValue = (key, val) => {
+    if (key === 'url_length' || key === 'num_hyphens' || key === 'num_subdomains') return val;
+    if (val === 1) return 'Yes';
+    if (val === 0) return 'No';
+    return val;
   };
 
   return (
     <div className="app-container">
       <div className="glass-panel">
+        <div className="badge">🛡️ 100% Client-Side AI · No Server Required</div>
         <h1 className="title">AI Phishing Shield</h1>
         <p className="subtitle">
-          Real-time Machine Learning detection system. Enter any URL to analyze it against our trained predictive models and active feature extraction.
+          Real-time Machine Learning phishing detection — powered entirely in your browser.
+          No data is ever sent to a server.
         </p>
-
-        {demoMode && (
-          <div className="demo-banner">
-            ⚡ <strong>Demo Mode</strong> — Backend server is offline. Results below are simulated locally for preview purposes.
-          </div>
-        )}
 
         <form className="search-form" onSubmit={checkUrl}>
           <input
             type="text"
+            id="url-input"
             className="search-input"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="e.g. https://secure-login.paypal-update.com"
             disabled={loading}
           />
-          <button type="submit" className="search-btn" disabled={loading || !url.trim()}>
+          <button type="submit" id="analyze-btn" className="search-btn" disabled={loading || !url.trim()}>
             {loading ? 'Scanning...' : 'Analyze'}
           </button>
         </form>
@@ -161,22 +137,43 @@ function App() {
                   </svg>
                 )}
               </div>
+
               <h2 className={`result-score ${isPhishing ? 'phishing-text' : 'safe-text'}`}>
-                {isPhishing ? 'Phishing Detected!' : 'Website is Safe'}
+                {isPhishing ? '⚠️ Phishing Detected!' : '✅ Website is Safe'}
               </h2>
               <p className="result-desc">
-                Our model is <strong>{isPhishing ? score : (100 - score)}%</strong> confident about this result.
+                Our model is{' '}
+                <strong>{isPhishing ? score : (100 - score)}%</strong>{' '}
+                confident about this result.
               </p>
+
+              {/* Risk meter */}
+              <div className="risk-meter">
+                <div className="risk-labels">
+                  <span>Safe</span><span>Dangerous</span>
+                </div>
+                <div className="risk-bar-track">
+                  <div
+                    className={`risk-bar-fill ${isPhishing ? 'phishing' : 'safe'}`}
+                    style={{ width: `${score}%` }}
+                  />
+                </div>
+                <div className="risk-pct">{score}% phishing risk</div>
+              </div>
             </div>
 
-            <h3 style={{ marginTop: '40px', color: '#f8fafc', fontWeight: 600 }}>Extracted Web Features</h3>
+            <div className="analyzed-url">
+              <span className="analyzed-label">Analyzed URL:</span>
+              <span className="analyzed-value">{result.url}</span>
+            </div>
+
+            <h3 className="features-title">🔍 Extracted Web Features</h3>
             <div className="features-grid">
               {Object.entries(result.features).map(([key, val]) => (
                 <div className="feature-item" key={key}>
                   <span className="feature-label">{formatFeatureName(key)}</span>
                   <span className={`feature-val ${getFeatureClass(key, val)}`}>
-                    {val === 1 && key.startsWith('has') || key.startsWith('is') ? 'Yes' : 
-                     val === 0 && key.startsWith('has') || key.startsWith('is') ? 'No' : val}
+                    {formatFeatureValue(key, val)}
                   </span>
                 </div>
               ))}
