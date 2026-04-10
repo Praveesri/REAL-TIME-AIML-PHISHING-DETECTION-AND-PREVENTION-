@@ -5,6 +5,10 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+# NOTE: The frontend uses VITE_API_URL to reach the FastAPI backend.
+# If no backend is deployed, the app automatically enters "Demo Mode"
+# and simulates results client-side so the UI still previews correctly.
+
 permissions:
   contents: read
   pages: write
@@ -29,6 +33,10 @@ jobs:
           node-version: 20
       - name: Install and Build
         working-directory: ./frontend
+        env:
+          # Set this secret in GitHub repo Settings → Secrets → Actions
+          # Leave empty to get auto demo mode when backend is not deployed
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
         run: |
           npm install
           npm run build

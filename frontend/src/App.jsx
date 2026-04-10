@@ -1,11 +1,34 @@
 import { useState } from 'react';
 import './App.css';
 
+// Use env variable (set in .env or GitHub Actions); fallback to localhost for dev
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// ---------- Mock result shown when backend is unreachable (demo / GitHub Pages) ----------
+const MOCK_RESULT = (url) => ({
+  url,
+  result: url.toLowerCase().includes('paypal') || url.toLowerCase().includes('login') || url.toLowerCase().includes('secure') ? 'Phishing' : 'Safe',
+  phishing_probability: url.toLowerCase().includes('paypal') || url.toLowerCase().includes('login') ? 0.91 : 0.07,
+  features: {
+    url_length: url.length,
+    num_hyphens: (url.match(/-/g) || []).length,
+    num_subdomains: (url.match(/\./g) || []).length - 1,
+    has_at_symbol: url.includes('@') ? 1 : 0,
+    has_ip_address: /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(url) ? 1 : 0,
+    has_suspicious_words: /secure|login|update|verify|paypal|bank|account/.test(url.toLowerCase()) ? 1 : 0,
+    is_https: url.startsWith('https') ? 1 : 0,
+    has_hidden_elements: 0,
+  },
+  _demo: true,
+});
+// ---------------------------------------------------------------------------------------
+
 function App() {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [demoMode, setDemoMode] = useState(false);
 
   const checkUrl = async (e) => {
     e.preventDefault();
@@ -16,26 +39,37 @@ function App() {
     setError(null);
 
     try {
-      // Clean up URL if it lacks scheme
-      let targetUrl = url.trim();
-      
-      const response = await fetch('http://localhost:8000/api/check-url', {
+      const targetUrl = url.trim();
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+      const response = await fetch(`${API_BASE}/api/check-url`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: targetUrl }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
 
       if (!response.ok) {
-        throw new Error('Server error: Please check if backend is running.');
+        throw new Error(`Server error ${response.status}: Please check if the backend is running.`);
       }
 
       const data = await response.json();
+      setDemoMode(false);
       setResult(data);
     } catch (err) {
       console.error(err);
-      setError(err.message || 'Error connecting to the analysis server.');
+
+      // If network/fetch fails → fall back to demo mode instead of raw error
+      if (err.name === 'AbortError' || err.name === 'TypeError' || err.message.includes('fetch')) {
+        setDemoMode(true);
+        setResult(MOCK_RESULT(url.trim()));
+        setError(null);
+      } else {
+        setError(err.message || 'Error connecting to the analysis server.');
+      }
     } finally {
       setLoading(false);
     }
@@ -80,6 +114,12 @@ function App() {
           Real-time Machine Learning detection system. Enter any URL to analyze it against our trained predictive models and active feature extraction.
         </p>
 
+        {demoMode && (
+          <div className="demo-banner">
+            ⚡ <strong>Demo Mode</strong> — Backend server is offline. Results below are simulated locally for preview purposes.
+          </div>
+        )}
+
         <form className="search-form" onSubmit={checkUrl}>
           <input
             type="text"
@@ -94,7 +134,7 @@ function App() {
           </button>
         </form>
 
-        {error && <div className="error-message">{error}</div>}
+        {error && <div className="error-message">⚠️ {error}</div>}
 
         {loading && (
           <div className="loader">
